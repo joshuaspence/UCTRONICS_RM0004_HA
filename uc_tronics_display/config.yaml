@@ -1,7 +1,7 @@
 name: "UCTronics Display"
 description: "UCTronics LCD Display"
 url: "https://github.com/UCTRONICS/UCTRONICS_RM0004_HA/tree/main/uc_tronics_display"
-version: "1.2.0"
+version: "1.2.1"
 slug: "uc_tronics_display"
 init: false
 arch:
@@ -12,6 +12,13 @@ arch:
   - i386
 gpio: true
 full_access: true
+# The header reads its address off eth0 with an ioctl, which answers for
+# whichever network namespace the process is in. On Supervisor's bridge that
+# is the add-on's own container, so the display showed its 172.30.32.x
+# address rather than the machine's. Sharing the host's namespace puts the
+# real interfaces in front of it. Nothing here listens on a port, so there is
+# no port to collide with the host.
+host_network: true
 devices: 
   - "/dev/i2c-1"
 privileged: 
