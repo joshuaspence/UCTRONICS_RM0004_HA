@@ -1,6 +1,13 @@
-ARG BUILD_FROM
-FROM $BUILD_FROM
-ENV LANG C.UTF-8
+# Supervisor used to inject BUILD_FROM for add-ons without a build.yaml, and
+# since 2026.04.0 it no longer does, which left this resolving to an empty
+# base image name. Naming the base here fixes that; keeping it an ARG means a
+# Supervisor that still passes one is honoured, and covers the architectures
+# this image does not. ghcr.io/home-assistant/base is amd64 and arm64 only,
+# so armhf, armv7 and i386 need their per-arch base passed in:
+#   --build-arg BUILD_FROM=ghcr.io/home-assistant/armv7-base:latest
+ARG BUILD_FROM=ghcr.io/home-assistant/base:latest
+FROM ${BUILD_FROM}
+ENV LANG=C.UTF-8
 
 RUN set -xe \
     && apk add --no-cache gcc build-base git i2c-tools linux-headers cmake
