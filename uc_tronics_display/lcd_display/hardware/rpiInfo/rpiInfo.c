@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <net/if.h>
+#include <ifaddrs.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
@@ -78,23 +79,195 @@ static int read_interface_address(const char *interface, char *buffer, size_t le
     return 0;
 }
 
+/*
+* Write the address this machine sends from into the caller's buffer.
+* Returns 0 on success, -1 if no route could be resolved.
+*
+* Nothing is sent. A UDP connect() only fixes the peer and has the kernel
+* pick a route for it, which is enough for getsockname() to report the
+* source address that route chose. The destination therefore has to be
+* routable, not reachable, and 192.0.2.1 is from the range RFC 5737 sets
+* aside for documentation, so it is matched by the default route and
+* belongs to nobody.
+*
+* This is what makes the lookup independent of interface naming: eth0,
+* end0 and enxb827eb000000 all answer the same way. It also steps around
+* the docker and hassio bridges that a walk of every interface holding an
+* address would otherwise pick up, since those are not where the default
+* route points.
+*/
+static int read_route_source_address(char *buffer, size_t length)
+{
+    int fd;
+    struct sockaddr_in peer;
+    struct sockaddr_in local;
+    socklen_t local_length = sizeof(local);
+    const char *address = NULL;
+
+    if (buffer == NULL || length == 0)
+    {
+        return -1;
+    }
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    memset(&peer, 0, sizeof(peer));
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(53);
+    peer.sin_addr.s_addr = inet_addr("192.0.2.1");
+    if (connect(fd, (struct sockaddr *)&peer, sizeof(peer)) != 0)
+    {
+        close(fd);
+        return -1;
+    }
+    memset(&local, 0, sizeof(local));
+    if (getsockname(fd, (struct sockaddr *)&local, &local_length) != 0)
+    {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+
+    address = inet_ntoa(local.sin_addr);
+    if (address == NULL)
+    {
+        return -1;
+    }
+    copy_string(buffer, length, address);
+    return 0;
+}
+
+/*
+* Interfaces that hold an address without being how the machine is
+* reached. A Home Assistant host runs containers, so it carries the docker
+* and hassio bridges and a veth end per container, any of which would be a
+* wrong answer as confidently as the right one.
+*/
+static int is_virtual_interface(const char *name)
+{
+    static const char *prefixes[] = {
+        "docker", "br-", "veth", "hassio", "virbr", "tun", "tap", "vmnet"
+    };
+    size_t index;
+
+    for (index = 0; index < sizeof(prefixes) / sizeof(prefixes[0]); index++)
+    {
+        if (strncmp(name, prefixes[index], strlen(prefixes[index])) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+* Write the address of the first usable interface into the caller's
+* buffer. Returns 0 on success, -1 if none carried one.
+*
+* Only reached when there is no default route to read an address from, so
+* it is picking between interfaces that cannot currently be routed over.
+* Wired is preferred over wireless, which is the order the old eth0 then
+* wlan0 lookup expressed. Predictable names make every wireless interface
+* start with w, and none of the wired ones do.
+*/
+static int read_any_interface_address(char *buffer, size_t length)
+{
+    struct ifaddrs *list = NULL;
+    struct ifaddrs *entry = NULL;
+    char wireless[IP_ADDRESS_LENGTH] = {0};
+    const char *address = NULL;
+    int found_wireless = 0;
+    int found = 0;
+
+    if (buffer == NULL || length == 0)
+    {
+        return -1;
+    }
+    if (getifaddrs(&list) != 0)
+    {
+        return -1;
+    }
+    for (entry = list; entry != NULL && !found; entry = entry->ifa_next)
+    {
+        if (entry->ifa_addr == NULL || entry->ifa_addr->sa_family != AF_INET)
+        {
+            continue;
+        }
+        if ((entry->ifa_flags & IFF_UP) == 0 || (entry->ifa_flags & IFF_RUNNING) == 0)
+        {
+            continue;
+        }
+        if (entry->ifa_flags & IFF_LOOPBACK)
+        {
+            continue;
+        }
+        if (is_virtual_interface(entry->ifa_name))
+        {
+            continue;
+        }
+        address = inet_ntoa(((struct sockaddr_in *)entry->ifa_addr)->sin_addr);
+        if (address == NULL)
+        {
+            continue;
+        }
+        if (entry->ifa_name[0] == 'w')
+        {
+            if (!found_wireless)
+            {
+                copy_string(wireless, sizeof(wireless), address);
+                found_wireless = 1;
+            }
+            continue;
+        }
+        copy_string(buffer, length, address);
+        found = 1;
+    }
+    freeifaddrs(list);
+
+    if (found)
+    {
+        return 0;
+    }
+    if (found_wireless)
+    {
+        copy_string(buffer, length, wireless);
+        return 0;
+    }
+    return -1;
+}
+
 void get_ip_address(char *buffer, size_t length)
 {
     const char *interface = (IPADDRESS_TYPE == WLAN0_ADDRESS) ? "wlan0" : "eth0";
 
-    if (read_interface_address(interface, buffer, length) != 0)
+    /* The configured interface wins where it exists, so this keeps meaning
+       what IPADDRESS_TYPE says. Where it does not, the name is the only
+       thing wrong with the request and falling back answers it anyway
+       rather than reporting no address at all. */
+    if (read_interface_address(interface, buffer, length) == 0)
     {
-        copy_string(buffer, length, IP_UNAVAILABLE);
+        return;
     }
+    get_ip_address_new(buffer, length);
 }
 
 void get_ip_address_new(char *buffer, size_t length)
 {
-    if (read_interface_address("eth0", buffer, length) == 0)
+    /* Asking for eth0 and wlan0 by name is what this used to do, and it
+       finds nothing on a host that names its interfaces predictably: a Pi
+       running Home Assistant OS presents end0, and the header fell back to
+       xxx.xxx.xxx.xxx while the machine had an address the whole time.
+
+       The route the machine actually sends over answers the question
+       without naming anything. Walking the interfaces is kept for a
+       machine with no default route, where there is no such answer. */
+    if (read_route_source_address(buffer, length) == 0)
     {
         return;
     }
-    if (read_interface_address("wlan0", buffer, length) == 0)
+    if (read_any_interface_address(buffer, length) == 0)
     {
         return;
     }
