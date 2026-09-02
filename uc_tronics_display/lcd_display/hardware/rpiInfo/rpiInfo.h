@@ -2,6 +2,11 @@
 #define  __RPIINFO_H
 
 #include <stdint.h>
+#include <stddef.h>
+
+/* Room for "xxx.xxx.xxx.xxx" and its terminator. */
+#define IP_ADDRESS_LENGTH 16
+
 /**********Select display temperature type**************/
 #define CELSIUS       0
 #define FAHRENHEIT    1
@@ -22,7 +27,9 @@
 #define CUSTOM_DISPLAY   "UCTRONICS"
 /************************Turn off the IP display. Can customize the display****************/
 
-char* get_ip_address(void);
+void get_ip_address(char *buffer, size_t length);
+void get_ip_address_new(char *buffer, size_t length);
+int get_disk_usage(uint64_t *totalBytes, uint64_t *usedBytes, uint64_t *availBytes);
 void get_sd_memory(uint32_t *MemSize, uint32_t *freesize);
 void get_cpu_memory(float *Totalram, float *freeram);
 uint8_t get_temperature(void);

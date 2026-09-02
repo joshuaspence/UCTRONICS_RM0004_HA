@@ -1,0 +1,6 @@
+# Build output. The add-on compiles these into the image; they are never
+# committed, but a local `make` here leaves them behind.
+obj/
+display
+display-cli
+*.d
